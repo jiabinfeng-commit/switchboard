@@ -1,0 +1,5 @@
+[tool.pytest.ini_options]
+# 让 tests/ 里的用例能直接 import switchboard，不依赖调用方式
+# （不加这行，`python3 -m pytest` 能跑，直接敲 `pytest` 会 import 失败）
+pythonpath = ["."]
+testpaths = ["tests"]

@@ -1,0 +1,7 @@
+# 运行
+openai>=1.40
+python-dotenv>=1.0
+jsonschema>=4.20
+
+# 测试
+pytest>=8.0
