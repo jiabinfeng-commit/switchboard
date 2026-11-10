@@ -26,7 +26,7 @@ from dotenv import load_dotenv
 from switchboard.agent.input import ModelView, StepInput, ToolSpec
 from switchboard.agent.llm import OpenAIChatModel
 from switchboard.agent.result import StepAction, StepResult
-from switchboard.agent.runtime import AgentRuntime, Draft
+from switchboard.agent.runtime import Draft, SingleAgentRuntime
 
 ZHANG = {
     "id": 12345,
@@ -157,7 +157,7 @@ OUTPUT_SCHEMA = {
 }
 
 
-def build_runtime(model, assets: list[dict[str, Any]]) -> AgentRuntime:
+def build_runtime(model, assets: list[dict[str, Any]]) -> SingleAgentRuntime:
     """按案例的资产列表构造 runtime，并挂上一个内存版的 asset_search。
 
     每个案例可以有自己的一组资产，互不干扰；工具实现就是下面的闭包。
@@ -172,7 +172,7 @@ def build_runtime(model, assets: list[dict[str, Any]]) -> AgentRuntime:
             if q and (q in asset["serial"].lower() or q in asset["owner"]["name"])
         ]
 
-    return AgentRuntime(model, tools={"asset_search": asset_search})
+    return SingleAgentRuntime(model, tools={"asset_search": asset_search})
 
 
 def main() -> None:
@@ -196,7 +196,8 @@ def main() -> None:
             output_schema=OUTPUT_SCHEMA,
         )
         result = build_runtime(model, case.assets).run(
-            StepInput(view=view, user_id="u-1001", allowed_entities=(3,))
+            StepInput(view=view, user_id="u-1001", allowed_entities=(3,)),
+            f"eval-{case.name}",
         )
         problem = case.verify(result)
         status = "PASS" if problem is None else "FAIL"

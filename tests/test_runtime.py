@@ -10,6 +10,7 @@ from switchboard.agent.runtime import (
     Draft,
     ModelError,
     RuntimeLimits,
+    SingleAgentRuntime,
     ToolCallRequest,
 )
 from switchboard.agent.tool import ToolInvocation
@@ -91,8 +92,8 @@ def run(model, tools=None, limits=RuntimeLimits(), step_input=None):
     默认挂一个永远返回 ASSETS 的 asset_search；用例要测白名单或执行器
     故障时自己传 tools 覆盖。
     """
-    runtime = AgentRuntime(model, tools or {"asset_search": asset_search}, limits)
-    return runtime.run(step_input or make_input())
+    runtime = SingleAgentRuntime(model, tools or {"asset_search": asset_search}, limits)
+    return runtime.run(step_input or make_input(), "test-key")
 
 
 def test_tool_then_verified_draft_succeeds():
@@ -330,9 +331,15 @@ def test_unparsable_output_is_retried_without_using_verify_budget():
 
 
 def test_missing_executor_is_a_wiring_error():
-    runtime = AgentRuntime(ScriptedModel([]), tools={})
+    runtime = SingleAgentRuntime(ScriptedModel([]), tools={})
     with pytest.raises(RuntimeError, match="没有执行器"):
-        runtime.run(make_input())
+        runtime.run(make_input(), "test-key")
+
+
+def test_single_runtime_satisfies_agent_runtime_protocol():
+    """接口是给外层看的；实现换不换，外层都不该知道。"""
+    runtime = SingleAgentRuntime(ScriptedModel([]), tools={})
+    assert isinstance(runtime, AgentRuntime)
 
 
 def test_turn_budget_exhausted():

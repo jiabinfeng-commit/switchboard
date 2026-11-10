@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 
 from switchboard.agent.input import ModelView, StepInput, ToolSpec
 from switchboard.agent.llm import OpenAIChatModel
-from switchboard.agent.runtime import AgentRuntime
+from switchboard.agent.runtime import SingleAgentRuntime
 
 ASSETS = [
     {
@@ -164,11 +164,11 @@ def main() -> None:
     )
     step_input = StepInput(view=view, user_id="u-1001", allowed_entities=(3,))
 
-    runtime = AgentRuntime(
+    runtime = SingleAgentRuntime(
         model,
         tools={"asset_search": asset_search, "kb_search": kb_search},
     )
-    result = runtime.run(step_input)
+    result = runtime.run(step_input, "demo-1")
 
     print(f"动作: {result.action}")
     print(f"原因: {result.cause}")

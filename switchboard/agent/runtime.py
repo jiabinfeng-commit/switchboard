@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol, runtime_checkable
 
 from jsonschema import Draft202012Validator
 
@@ -99,7 +99,29 @@ def _validate_arguments(spec: ToolSpec, arguments: Mapping[str, Any]) -> str | N
     return "; ".join(error.message for error in errors[:3])
 
 
-class AgentRuntime:
+@runtime_checkable
+class AgentRuntime(Protocol):
+    """一步 agent 执行的契约，外层流程引擎只认识它（ADR 0004）。
+
+    实现可以是这里的单步骤循环，也可以是 LangGraph 图；共同点是：
+    - 输入只有 StepInput，不知道实例、时间、挂起；
+    - 输出恰好一个 StepResult，内部循环对上游不可见；
+    - 必须一次返回，不能把「等人」「等事件」藏在内部。
+    """
+
+    def run(self, step_input: StepInput, idempotency_key: str) -> StepResult:
+        """执行一步。
+
+        idempotency_key 由外层执行记录提供（ADR 0003）。当前 agent 内部
+        工具只读，所以实现暂时不消费它；接口保留是为了将来允许幂等写操作
+        时不用改契约。
+        """
+        ...
+
+
+class SingleAgentRuntime:
+    """用代码循环实现的单步运行时，LangGraph 版本的对照与回退。"""
+
     def __init__(
         self,
         model: Model,
@@ -117,8 +139,12 @@ class AgentRuntime:
         self._limits = limits
         self._seq = 0
 
-    def run(self, step_input: StepInput) -> StepResult:
+    def run(self, step_input: StepInput, idempotency_key: str) -> StepResult:
         """执行一步，返回恰好一个 StepResult。
+
+        当前工具只读，idempotency_key 不参与逻辑；它属于外层契约
+        （ADR 0003），保留参数是为了让 LangGraph 实现和写工具接入时
+        不需要再改接口。
 
         循环里处理三种模型输出：
         - tool_call：执行后把记录喂回模型，继续下一轮；
