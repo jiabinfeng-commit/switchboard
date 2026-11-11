@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from switchboard.agent.input import ModelView, StepInput, ToolSpec
+from switchboard.agent.input import ModelView, StepInput, ToolSideEffect, ToolSpec
 from switchboard.agent.prompt import build_data_prompt, build_system_prompt
 from switchboard.agent.tool import ToolInvocation
 
@@ -15,6 +15,7 @@ VIEW = ModelView(
                 "properties": {"q": {"type": "string"}},
                 "required": ["q"],
             },
+            side_effect=ToolSideEffect.READ,
         ),
     ),
     output_schema={"asset_id": "资产 id"},

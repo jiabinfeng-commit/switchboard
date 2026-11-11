@@ -96,7 +96,21 @@ checkpointer 买的是「从图中间继续」，带来第二套持久化状态�
 跨步骤的多 agent 不画进一张 LangGraph 图，建模成业务流程里的多个 agent
 节点，由外层引擎推进。这样「多个 agent」和「跨天等待」不会挤在同一层。
 
-### 7. 第一个复杂场景：故障诊断
+### 7. 进程内协作，不使用 A2A
+
+本项目的多 agent 都在同一个进程、同一次 `run()` 内：共享工具和状态，
+直接函数或子图调用。A2A 面向跨进程、跨组织、需要能力发现和任务委派的
+场景，这里没有对端，也没有跨厂商需求；引入它只会增加网络、身份、
+序列化与版本协商的成本。
+
+将来如果要接外部团队或厂商提供的 agent（例如厂商保修查询），那属于
+外部系统集成，走防腐层（Backend 接口 + Adapter），和接 GLPI API 同级，
+不放进内部的多 agent 图。
+
+MCP 同理：它解决 agent 与工具/数据源之间的协议，接 GLPI 工具时可以用，
+但不是必须。当前 `ToolExecutor` 函数已经够用，等工具需要跨进程时再考虑。
+
+### 8. 第一个复杂场景：故障诊断
 
 选择理由：与现有报障受理同域，可复用 StepResult、verify、工具 schema 和
 外层引擎；数据源天然只读；有明确的评测标准。
@@ -117,7 +131,7 @@ checkpointer 买的是「从图中间继续」，带来第二套持久化状态�
 第二个场景：从已解决工单生成 KB 草稿（聚类、提取步骤、去重、引用校验、
 人工审核发布）。它练离线归纳与内容质量评测，与故障诊断互补，排在后面。
 
-### 8. 评测是验收条件
+### 9. 评测是验收条件
 
 没有评测的多 agent 只是 demo。故障诊断先建 20-30 个标注案例，覆盖：
 
@@ -133,6 +147,17 @@ checkpointer 买的是「从图中间继续」，带来第二套持久化状态�
 内部记录每轮模型输出、工具调用、校验结果。回放时先看外层走到哪个节点、
 返回什么动作，再看内部为什么返回这个动作。这是区分「流程错」和「模型错」
 的唯一办法。
+
+### 10. 两个实现的分工
+
+`SingleAgentRuntime` 冻结在切片 3b 的行为，只作为对照与回退：允许修 bug、
+跟随共用函数重构，不再增加新能力（并行、子图、新预算都不加）。
+`LangGraphRuntime` 是唯一继续生长的实现，3c / 3d 的新结构只加在这里。
+
+理由是两份实现已经让路由和预算逻辑各有一份副本；3c 加入并行数据源和
+专家子图后，「行为一致」不再是目标，如果两边都长，每次改动都要写两遍、
+再维护一套对照用例。对照用例保留到 3c 评测结束，用评测结果决定删掉
+还是留作回归基线。
 
 ## 切片划分
 
@@ -155,8 +180,13 @@ checkpointer 买的是「从图中间继续」，带来第二套持久化状态�
 
 ## 实现
 
-- 待建：`switchboard/agent/runtime.py` 的接口抽取
-- 待建：LangGraph 实现
+- 已有：`switchboard/agent/runtime.py` 的 `AgentRuntime` 接口与
+  `SingleAgentRuntime`（3a），工具执行、草稿校验抽成模块函数供两个实现共用
+- 已有：`switchboard/agent/langgraph_runtime.py`（3b），图节点为
+  `model / tool / ask / draft`，无 checkpointer、无 interrupt；与代码循环版本
+  跑同一套脚本，12 个对照用例断言 `StepResult` 和每轮 feedback 一致
+- 已有：`scripts/trace_agent.py`，外层 `step_execution.key` 关联图内节点轨迹
+- 版本：`langgraph>=1.2,<2`（requirements.txt），大版本升级需重跑对照用例
 - 待建：`switchboard/workflows/troubleshooting.py`
 - 待建：评测用例与指标脚本
 - 现有：`switchboard/agent/*`（切片 1）、`switchboard/workflow/*`（2a/2b）

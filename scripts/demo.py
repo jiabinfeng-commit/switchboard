@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from dotenv import load_dotenv
 
-from switchboard.agent.input import ModelView, StepInput, ToolSpec
+from switchboard.agent.input import ModelView, StepInput, ToolSideEffect, ToolSpec
 from switchboard.agent.llm import OpenAIChatModel
 from switchboard.agent.runtime import SingleAgentRuntime
 
@@ -142,6 +142,7 @@ def main() -> None:
                     "required": ["q"],
                     "additionalProperties": False,
                 },
+                side_effect=ToolSideEffect.READ,
             ),
             ToolSpec(
                 name="kb_search",
@@ -154,6 +155,7 @@ def main() -> None:
                     "required": ["q"],
                     "additionalProperties": False,
                 },
+                side_effect=ToolSideEffect.READ,
             ),
         ),
         output_schema={

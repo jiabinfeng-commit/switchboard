@@ -2,6 +2,8 @@
 openai>=1.40
 python-dotenv>=1.0
 jsonschema>=4.20
+# Agent 运行时：只在大版本内升级，图 API 和轨迹格式都可能随大版本变
+langgraph>=1.2,<2
 
 # 测试
 pytest>=8.0

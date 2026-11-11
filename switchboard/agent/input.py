@@ -12,7 +12,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import StrEnum
 from typing import Any, Mapping
+
+
+class ToolSideEffect(StrEnum):
+    """工具是否有副作用。agent 内部只允许 READ。"""
+
+    READ = "read"
+    WRITE = "write"
 
 
 @dataclass(frozen=True)
@@ -27,6 +35,13 @@ class ToolSpec:
     # 两者不能互相替代。实测：只给描述时模型会自己发明参数名
     # （传 serial，执行器读的是 q），结果返回空列表，看起来像「查无记录」。
     parameters: Mapping[str, Any]
+
+    # 故意不给默认值：新增工具时必须显式想一次「它写不写库」。
+    # 默认成 READ 的话，以后加写工具忘了改，崩溃重跑就会重复建单，
+    # 而没有任何一处代码提醒过。
+    # 注意这是装配方的声明，运行时无法验证执行器真的只读；
+    # 真正的保证是写操作不进 agent 的工具表，而是外层 tool 节点（ADR 0004）。
+    side_effect: ToolSideEffect
 
 
 @dataclass(frozen=True)

@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from dotenv import load_dotenv
 
-from switchboard.agent.input import ModelView, StepInput, ToolSpec
+from switchboard.agent.input import ModelView, StepInput, ToolSideEffect, ToolSpec
 from switchboard.agent.llm import OpenAIChatModel
 from switchboard.agent.result import StepAction, StepResult
 from switchboard.agent.runtime import Draft, SingleAgentRuntime
@@ -147,6 +147,7 @@ TOOLS = (
             "required": ["q"],
             "additionalProperties": False,
         },
+        side_effect=ToolSideEffect.READ,
     ),
 )
 

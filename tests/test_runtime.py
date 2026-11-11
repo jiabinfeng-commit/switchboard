@@ -2,7 +2,7 @@ from typing import Any, Mapping
 
 import pytest
 
-from switchboard.agent.input import ModelView, StepInput, ToolSpec
+from switchboard.agent.input import ModelView, StepInput, ToolSideEffect, ToolSpec
 from switchboard.agent.result import StepAction
 from switchboard.agent.questions import AskKind, AskUser
 from switchboard.agent.runtime import (
@@ -58,6 +58,7 @@ def make_input() -> StepInput:
                         "required": ["q"],
                         "additionalProperties": False,
                     },
+                    side_effect=ToolSideEffect.READ,
                 ),
             ),
         ),

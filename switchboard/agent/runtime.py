@@ -22,7 +22,7 @@ from typing import Any, Callable, Mapping, Protocol, runtime_checkable
 
 from jsonschema import Draft202012Validator
 
-from switchboard.agent.input import ModelView, StepInput, ToolSpec
+from switchboard.agent.input import ModelView, StepInput, ToolSideEffect, ToolSpec
 from switchboard.agent.questions import (
     AskUser,
     referenced_calls,
@@ -89,7 +89,7 @@ class RuntimeLimits:
 FORBIDDEN_ARGUMENT_KEYS = frozenset({"user_id", "owner_id", "requester_id"})
 
 
-def _validate_arguments(spec: ToolSpec, arguments: Mapping[str, Any]) -> str | None:
+def validate_tool_arguments(spec: ToolSpec, arguments: Mapping[str, Any]) -> str | None:
     """按工具的参数 schema 校验。返回错误摘要，通过时返回 None。"""
     validator = Draft202012Validator(spec.parameters)
     errors = sorted(validator.iter_errors(arguments), key=lambda e: list(e.path))
@@ -119,8 +119,127 @@ class AgentRuntime(Protocol):
         ...
 
 
+def require_read_only_tools(tool_specs: Mapping[str, ToolSpec]) -> None:
+    """检查 agent 内部工具是否全部只读。
+
+    写工具放进 agent 会让整步重跑不再安全：执行记录停在 started 时，
+    恢复会重跑，写操作就发生两次。写操作放外层 tool 节点，由外层
+    幂等键和重试策略管（ADR 0004 决策 3）。
+    """
+    writing = sorted(
+        name
+        for name, spec in tool_specs.items()
+        if spec.side_effect is not ToolSideEffect.READ
+    )
+    if writing:
+        raise RuntimeError(f"agent 内部只允许只读工具：{writing}")
+
+
+def execute_tool_call(
+    request: ToolCallRequest,
+    call_id: str,
+    tool_specs: Mapping[str, ToolSpec],
+    tools: Mapping[str, ToolExecutor],
+) -> ToolInvocation:
+    """执行一次工具调用，无论成败都返回 ToolInvocation 记录。
+
+    依次检查：工具在白名单里、参数不含身份字段、参数符合 JSON Schema。
+    任何一项不过都不执行，而是记一条带 error 的调用。这样做有两个目的：
+    模型能看到自己错在哪并改正；事后审计能还原它尝试过什么。
+    执行器抛异常也收敛成记录，不让一次工具故障打断整个循环。
+    """
+    # 以下四种情况都写成 ToolInvocation：它们都是「模型尝试过一次」的事实，
+    # 不记录就查不出模型在乱试什么。代价是这类记录没有返回值，
+    # 引用它的 ValueRef 会因为 CALL_FAILED 被拒——这正是期望行为。
+    spec = tool_specs.get(request.tool_name)
+    if spec is None:
+        return ToolInvocation(
+            call_id=call_id,
+            tool_name=request.tool_name,
+            arguments=dict(request.arguments),
+            error="tool_not_allowed",
+        )
+
+    forbidden = FORBIDDEN_ARGUMENT_KEYS & set(request.arguments)
+    if forbidden:
+        return ToolInvocation(
+            call_id=call_id,
+            tool_name=request.tool_name,
+            arguments=dict(request.arguments),
+            error=f"forbidden_argument:{sorted(forbidden)}",
+        )
+
+    # 参数不符合 schema 就不执行。否则执行器读不到参数会返回空结果，
+    # 模型把它当成「查无记录」，一路错下去且没人发现。
+    argument_error = validate_tool_arguments(spec, request.arguments)
+    if argument_error:
+        return ToolInvocation(
+            call_id=call_id,
+            tool_name=request.tool_name,
+            arguments=dict(request.arguments),
+            error=f"invalid_arguments:{argument_error}",
+        )
+
+    try:
+        result = tools[request.tool_name](request.arguments)
+    except Exception as exc:  # 工具实现的问题不应让整个执行崩掉
+        return ToolInvocation(
+            call_id=call_id,
+            tool_name=request.tool_name,
+            arguments=dict(request.arguments),
+            error=f"execution_error:{exc}",
+        )
+
+    return ToolInvocation(
+        call_id=call_id,
+        tool_name=request.tool_name,
+        arguments=dict(request.arguments),
+        result=result,
+    )
+
+
+def verify_draft(
+    draft: Draft,
+    invocations: Mapping[str, ToolInvocation],
+) -> list[str]:
+    """逐个字段校验草稿的出处，返回问题列表（空列表表示全部通过）。
+
+    每个字段必须是 ValueRef，且路径能在指定调用的 result 里解析出相等的值。
+    这里检查的是「值从哪来」，不是「值对不对」——语义正确性由模型负责，
+    代码只保证它没有凭空生成。这个边界写在 ADR 0001 第 5 条。
+    """
+    problems: list[str] = []
+    for name, ref in draft.fields.items():
+        if not isinstance(ref, ValueRef):
+            problems.append(f"{name}: 缺少出处，所有字段都必须是 ValueRef")
+            continue
+        verified = verify_ref(ref, invocations)
+        if not verified.ok:
+            problems.append(f"{name}: {verified.rejection} {verified.detail}")
+    return problems
+
+
+def need_human(cause: str) -> StepResult:
+    """构造「需要人工」的结果。
+
+    内部预算用尽、追问结构不合法、草稿始终无法追溯来源，都属于系统侧
+    处理不了的情况；让员工补信息也没用，只能交人工。
+    本切片没有写操作，所以 may_have_committed 固定为 False；
+    接入建单后要按实际是否发出请求来填。
+    """
+    return StepResult(
+        action=StepAction.NEED_HUMAN,
+        may_have_committed=False,
+        cause=cause,
+    )
+
+
 class SingleAgentRuntime:
-    """用代码循环实现的单步运行时，LangGraph 版本的对照与回退。"""
+    """用代码循环实现的单步运行时，冻结在切片 3b，作为对照与回退。
+
+    不再增加新能力；并行、专家子图等结构只加进 LangGraphRuntime
+    （ADR 0004 决策 10）。这里允许的改动只有修 bug 和跟随共用函数重构。
+    """
 
     def __init__(
         self,
@@ -157,6 +276,7 @@ class SingleAgentRuntime:
         上游只认动作，不认异常。
         """
         tool_specs = {tool.name: tool for tool in step_input.view.tools}
+        require_read_only_tools(tool_specs)
         missing = tool_specs.keys() - self._tools.keys()
         if missing:
             # 白名单里有工具但没实现，是装配错误，不是运行时该处理的情况
@@ -176,7 +296,10 @@ class SingleAgentRuntime:
                 continue
 
             if isinstance(output, ToolCallRequest):
-                invocation = self._execute(output, tool_specs, invocations)
+                self._seq += 1
+                invocation = execute_tool_call(
+                    output, f"c-{self._seq}", tool_specs, self._tools
+                )
                 invocations[invocation.call_id] = invocation
                 feedback = None if invocation.ok else f"工具调用失败：{invocation.error}"
                 continue
@@ -191,7 +314,7 @@ class SingleAgentRuntime:
                     verify_failures += 1
                     feedback = "这次追问不成立：\n" + "\n".join(ask_problems)
                     if verify_failures > self._limits.max_verify_retries:
-                        return self._need_human("invalid_ask")
+                        return need_human("invalid_ask")
                     continue
 
                 # 句子由代码渲染，事实槽位只来自工具结果；
@@ -208,7 +331,7 @@ class SingleAgentRuntime:
                     payload=render_question(output, invocations),
                 )
 
-            problems = self._verify_draft(output, invocations)
+            problems = verify_draft(output, invocations)
             if not problems:
                 return StepResult(
                     action=StepAction.SUCCEEDED,
@@ -223,109 +346,6 @@ class SingleAgentRuntime:
             feedback = "以下字段无法追溯到工具结果，请重新选择出处：\n" + "\n".join(problems)
             if verify_failures > self._limits.max_verify_retries:
                 # 每个终止路径自己说明原因，不靠一个被反复覆盖的变量推断
-                return self._need_human("verification_failed")
+                return need_human("verification_failed")
 
-        return self._need_human("turn_budget_exhausted")
-
-    @staticmethod
-    def _need_human(cause: str) -> StepResult:
-        """构造「需要人工」的结果。
-
-        内部预算用尽、追问结构不合法、草稿始终无法追溯来源，都属于系统侧
-        处理不了的情况；让员工补信息也没用，只能交人工。
-        本切片没有写操作，所以 may_have_committed 固定为 False；
-        接入建单后要按实际是否发出请求来填。
-        """
-        # 内部预算用尽属于系统侧问题：用户补信息解决不了，只能交人工。
-        # may_have_committed=False 因为本切片没有写操作；写步骤要按实际情况填。
-        return StepResult(
-            action=StepAction.NEED_HUMAN,
-            may_have_committed=False,
-            cause=cause,
-        )
-
-    def _execute(
-        self,
-        request: ToolCallRequest,
-        tool_specs: Mapping[str, ToolSpec],
-        invocations: Mapping[str, ToolInvocation],
-    ) -> ToolInvocation:
-        """执行一次工具调用，无论成败都返回 ToolInvocation 记录。
-
-        依次检查：工具在白名单里、参数不含身份字段、参数符合 JSON Schema。
-        任何一项不过都不执行，而是记一条带 error 的调用。这样做有两个目的：
-        模型能看到自己错在哪并改正；事后审计能还原它尝试过什么。
-        执行器抛异常也收敛成记录，不让一次工具故障打断整个循环。
-        """
-        self._seq += 1
-        call_id = f"c-{self._seq}"
-
-        # 以下四种情况都写成 ToolInvocation：它们都是「模型尝试过一次」的事实，
-        # 不记录就查不出模型在乱试什么。代价是这类记录没有返回值，
-        # 引用它的 ValueRef 会因为 CALL_FAILED 被拒——这正是期望行为。
-        spec = tool_specs.get(request.tool_name)
-        if spec is None:
-            return ToolInvocation(
-                call_id=call_id,
-                tool_name=request.tool_name,
-                arguments=dict(request.arguments),
-                error="tool_not_allowed",
-            )
-
-        forbidden = FORBIDDEN_ARGUMENT_KEYS & set(request.arguments)
-        if forbidden:
-            return ToolInvocation(
-                call_id=call_id,
-                tool_name=request.tool_name,
-                arguments=dict(request.arguments),
-                error=f"forbidden_argument:{sorted(forbidden)}",
-            )
-
-        # 参数不符合 schema 就不执行。否则执行器读不到参数会返回空结果，
-        # 模型把它当成「查无记录」，一路错下去且没人发现。
-        argument_error = _validate_arguments(spec, request.arguments)
-        if argument_error:
-            return ToolInvocation(
-                call_id=call_id,
-                tool_name=request.tool_name,
-                arguments=dict(request.arguments),
-                error=f"invalid_arguments:{argument_error}",
-            )
-
-        try:
-            result = self._tools[request.tool_name](request.arguments)
-        except Exception as exc:  # 工具实现的问题不应让整个执行崩掉
-            return ToolInvocation(
-                call_id=call_id,
-                tool_name=request.tool_name,
-                arguments=dict(request.arguments),
-                error=f"execution_error:{exc}",
-            )
-
-        return ToolInvocation(
-            call_id=call_id,
-            tool_name=request.tool_name,
-            arguments=dict(request.arguments),
-            result=result,
-        )
-
-    @staticmethod
-    def _verify_draft(
-        draft: Draft,
-        invocations: Mapping[str, ToolInvocation],
-    ) -> list[str]:
-        """逐个字段校验草稿的出处，返回问题列表（空列表表示全部通过）。
-
-        每个字段必须是 ValueRef，且路径能在指定调用的 result 里解析出相等的值。
-        这里检查的是「值从哪来」，不是「值对不对」——语义正确性由模型负责，
-        代码只保证它没有凭空生成。这个边界写在 ADR 0001 第 5 条。
-        """
-        problems: list[str] = []
-        for name, ref in draft.fields.items():
-            if not isinstance(ref, ValueRef):
-                problems.append(f"{name}: 缺少出处，所有字段都必须是 ValueRef")
-                continue
-            verified = verify_ref(ref, invocations)
-            if not verified.ok:
-                problems.append(f"{name}: {verified.rejection} {verified.detail}")
-        return problems
+        return need_human("turn_budget_exhausted")
